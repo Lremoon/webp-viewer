@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebP 画廊</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <div id="toolbar">
+      <button id="btn-open">打开图片</button>
+      <label>速度(px/s)<input id="input-speed" type="number" min="0" max="2000" step="5" value="50" /></label>
+      <label>尺寸
+        <select id="select-fit">
+          <option value="fitHeight">适应高度</option>
+          <option value="original">原始 1:1</option>
+        </select>
+      </label>
+      <label>缓存张数<input id="input-cache" type="number" min="2" max="200" step="1" value="10" /></label>
+    </div>
+    <div id="viewport">
+      <div id="film"></div>
+    </div>
+  </body>
+</html>
