@@ -1,59 +1,56 @@
 # WebP 横向滚动画廊看图器 — 设计文档
 
-> 配套：[requirements.md](requirements.md) ｜ 阶段：原型 ｜ 2026-06-29
+> 配套：[requirements.md](requirements.md) ｜ 阶段：原型 v0.3 ｜ 2026-06-30
 
 ## 1. 架构（Tauri v2）
 
-- **后端 Rust**（`src-tauri`）：列目录 webp 路径 + 自然排序；通过 asset 协议让前端加载本地文件
-- **前端 TS**（`src`）：滚动引擎 + 缓存窗口 + 尺寸计算 + 最小 UI
-- **渲染**：WebView2（Chromium），`<img>` 原生支持 animated webp，零成本
+- **后端 Rust**（`src-tauri`）：列目录图片 + 自然排序 + `imagesize` 预读尺寸；返回 `{ entries, startIndex }`
+- **前端 TS**（`src`）：双向滚动引擎 + 缓存窗口 + 尺寸计算 + UI
+- **渲染**：WebView2，`<img>` 原生支持 webp/jpg/png（含 animated webp）
 
 ## 2. 核心数据
 
-- `paths: string[]` 目录所有 webp 路径（自然排序后）
-- `maxCached` 缓存上限（可配置，默认 10）
-- `offset` 已卸载图片累计宽度 —— 用于位置补偿，保证视觉不跳
-- DOM 中当前缓存的图：有序集合，每项 `{ index, width, el }`
+- `entries: {path,w,h}[]`（排序后），`startIndex` 选中文件索引（双向缓存中心）
+- `maxCached` UI 显示值；`effectiveMax` 偶数化（奇数 +1）；`half = effectiveMax/2`
+- `prefixSum[0..n]` + `totalWidth`：一轮循环的宽度累加（随 fitMode / 视口高度重算）
+- `viewportLeft`：视口左边缘的**绝对逻辑坐标**（可正可负，随滚动增减）
+- `items: {logicalIndex, el}[]`：当前缓存的图，靠绝对坐标定位，数组无须有序
 
-## 3. 滚动引擎
+## 3. 循环坐标（核心）
 
-- **viewport**：`overflow: hidden`，宽×高 = 屏幕尺寸
-- **film**：viewport 内的水平容器，所有缓存图横向排列
-- 每帧（`requestAnimationFrame`）：film 位移 `+= speed(px/s) × dt`
-- 速度 50 px/s，UI 可调
+- 一轮 n 张图，`totalWidth` = 全部宽度之和
+- `logicalX(k) = floor(k/n)*totalWidth + prefixSum[k mod n]` —— 任意逻辑序号（可负 / 超大）的绝对左边缘
+- `kAtX(x)`：反查，绝对坐标 → 落在哪张图（二分 `prefixSum` + 取模还原）
+- 循环天然成立：k 无限，取模映射回 entries
 
-## 4. 循环
+## 4. 滚动 / 暂停 / 调速
 
-- 图序列视为**无限**：加载第 i 张时路径取 `paths[i mod paths.length]`
-- 无需首尾物理拼接，取模天然循环
+- `tick`：`viewportLeft += speed*dt`（speed 可负 → 反向滚动）
+- 暂停：`state.paused`，tick 内 `if (!paused)` 才推进
+- 暂停触发：工具栏「⏸/▶」按钮，或**点击 viewport**（快捷键）
+- 滚轮：上 = `+10`，下 = `−10`，speed 可过 0 变负
 
-## 5. 加载 / 卸载（核心算法）
+## 5. 双向缓存窗口
 
-**加载（追加右侧）**
-- 跟踪当前最后一张图右边缘的世界坐标
-- 当「视口右边缘 − 最后图右边缘」< 预留阈值（约 1 屏宽）→ 追加下一张
-
-**卸载（移除左侧，延迟）**
-- 最左图完全移出视口（右边缘世界坐标 < 视口左）**且** DOM 图数 > `maxCached` → 移除最左图
-- 位置补偿：卸掉宽 W 的图 → `offset += W`（后续图渲染坐标 = 世界坐标 − offset，视觉位置不变、不跳）
-
-**初始预加载**：打开首张后窗口初始化为 `[0, 4]`（首张 + 后 4 张）
+- 可见范围：左 = `kAtX(viewportLeft)`，右 = `kAtX(viewportLeft + vw)`
+- 窗口 = `[左 − half, 右 + half]`
+- `syncWindow` 每帧：卸载窗口外的 items、加载窗口内缺失的
+- 正向 / 反向滚动均自动维护（viewportLeft 增减，窗口随之双向滑动）
 
 ## 6. 尺寸模式
 
-- **适应高度**（默认）：img 高度 = viewport 高，宽度 = `高 × (naturalW / naturalH)`。横向 flex 排列，各图宽度不同。natural 尺寸在 `img.onload` 后取得，加载前用占位
-- **原始 1:1**：natural 尺寸，高度超屏时允许纵向拖动
+- 适应高度（默认）：img 高 = viewport 高，宽 = `高 × (w/h)`
+- 原始 1:1：natural 尺寸
+- 切换 / resize：`relayout` 重算 `prefixSum` + 保持左可见图不变
 
-## 7. UI（最小）
+## 7. UI
 
-- 「打开文件」按钮 → 文件选择 → 取目录、列路径、开始滚动
-- 速度滑块（px/s）
-- 尺寸模式切换（适应高度 / 原始）
-- 缓存张数输入
+- 打开图片 / ⏸ 暂停-▶ 继续 按钮
+- 速度输入框（同步含负数）/ 尺寸切换 / 缓存张数
+- 滚轮在 viewport 上调速
 
-## 8. 风险 / 待验证
+## 8. 风险 / 已验证
 
-- 卸载位置补偿的正确性（offset 方案）—— 核心难点，需实测不跳
-- `naturalWidth` 加载延迟 → 占位策略
-- Tauri v2 asset 协议 scope 配置（允许读取所选目录）
-- 大图显存：`maxCached` 控制 DOM 数，浏览器自动回收；10 张大图内存原型阶段可接受
+- 循环坐标对负数 / 超大数的取模正确性（`((k%n)+n)%n`）
+- 双向窗口无跳变（绝对坐标定位，各图独立 left）
+- 卸载 / 加载的窗口边界

@@ -1,11 +1,19 @@
 use std::path::Path;
 
-// 一张图的条目：路径 + 原始宽高（供前端计算缩放与布局）
+// 一张图的条目：路径 + 原始宽高
 #[derive(serde::Serialize)]
 struct ImgEntry {
     path: String,
     w: u32,
     h: u32,
+}
+
+// 列目录结果：所有图 + 选中文件在列表中的索引（前端用作双向缓存中心）
+#[derive(serde::Serialize)]
+struct ListResult {
+    entries: Vec<ImgEntry>,
+    #[serde(rename = "startIndex")]
+    start_index: usize,
 }
 
 // 自然排序：数字部分按数值比较（img2 < img10），其余按字符序
@@ -55,7 +63,6 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-// 支持的图片扩展名
 const IMG_EXTS: &[&str] = &["webp", "jpg", "jpeg", "png"];
 
 fn is_image_ext(p: &Path) -> bool {
@@ -65,9 +72,9 @@ fn is_image_ext(p: &Path) -> bool {
     }
 }
 
-// 列出给定文件所在目录下所有支持的图片（自然排序），用 imagesize 预读尺寸
+// 列出给定文件所在目录下所有支持的图片（自然排序），返回列表 + 选中文件索引
 #[tauri::command]
-fn list_images(path: String) -> Result<Vec<ImgEntry>, String> {
+fn list_images(path: String) -> Result<ListResult, String> {
     let file = Path::new(&path);
     let dir = file.parent().ok_or_else(|| "无法获取父目录".to_string())?;
 
@@ -84,7 +91,14 @@ fn list_images(path: String) -> Result<Vec<ImgEntry>, String> {
         natural_cmp(an, bn)
     });
 
-    let result = files
+    // 选中文件在排序列表中的位置（按文件名匹配，同目录内唯一）
+    let selected_name = file.file_name();
+    let start_index = files
+        .iter()
+        .position(|p| p.file_name() == selected_name)
+        .unwrap_or(0);
+
+    let entries = files
         .into_iter()
         .map(|p| {
             let (w, h) = imagesize::size(&p)
@@ -97,7 +111,8 @@ fn list_images(path: String) -> Result<Vec<ImgEntry>, String> {
             }
         })
         .collect();
-    Ok(result)
+
+    Ok(ListResult { entries, start_index })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

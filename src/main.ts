@@ -6,181 +6,235 @@ interface ImgEntry {
   w: number;
   h: number;
 }
-
+interface ListResult {
+  entries: ImgEntry[];
+  startIndex: number;
+}
 type FitMode = "fitHeight" | "original";
 
 // 全局状态
 const state = {
   entries: [] as ImgEntry[],
-  speed: 50, // px/s
-  maxCached: 10,
+  speed: 50, // px/s，可为负（负=反向滚动）
+  maxCached: 10, // UI 显示值；内部偶数化
   fitMode: "fitHeight" as FitMode,
+  paused: false,
 };
 
-// DOM 引用
+// DOM
 let viewport: HTMLElement;
 let film: HTMLElement;
 let btnOpen: HTMLButtonElement;
+let btnToggle: HTMLButtonElement;
 let inputSpeed: HTMLInputElement;
 let selectFit: HTMLSelectElement;
 let inputCache: HTMLInputElement;
 
-// 当前在 DOM 里的缓存图（按逻辑顺序排列）
+// 当前缓存的图（逻辑序号 + 元素）。靠绝对坐标定位，数组无须有序
 interface Item {
-  logicalIndex: number; // 逻辑序号，无限递增；取模得 entries 索引，从而循环
+  logicalIndex: number;
   el: HTMLImageElement;
-  logicalX: number; // 左边缘逻辑坐标
-  width: number;
 }
 const items: Item[] = [];
 
-let viewportLeft = 0; // 视口左边缘的逻辑坐标（随滚动递增）
-let nextLogicalIndex = 0; // 下一张待加载的逻辑序号
-let nextLogicalX = 0; // 下一张将占据的 logicalX（= 已加载内容的最右边缘）
-
+let viewportLeft = 0; // 视口左边缘的绝对逻辑坐标（可正可负）
 let rafId = 0;
 let lastTime = 0;
 
-function entryAt(logicalIndex: number): ImgEntry {
-  return state.entries[logicalIndex % state.entries.length];
+// 一轮循环的宽度累加（随 fitMode / 视口高度变化而重算）
+let prefixSum: number[] = [0];
+let totalWidth = 0;
+
+const SPEED_STEP = 10; // 滚轮每次步进 px/s
+
+function n(): number {
+  return state.entries.length;
+}
+function effectiveMax(): number {
+  const m = state.maxCached;
+  return m % 2 === 0 ? m : m + 1; // 奇数内部 +1 偶数化（UI 仍显示原值）
+}
+function halfBuffer(): number {
+  return Math.floor(effectiveMax() / 2);
+}
+function entryWidth(logicalIndex: number): number {
+  const idx = ((logicalIndex % n()) + n()) % n();
+  const e = state.entries[idx];
+  if (e.w === 0 || e.h === 0) return viewport.clientHeight;
+  return state.fitMode === "fitHeight"
+    ? Math.round((e.w / e.h) * viewport.clientHeight)
+    : e.w;
 }
 
-function computeWidth(e: ImgEntry): number {
-  if (e.w === 0 || e.h === 0) return viewport.clientHeight; // 尺寸未知时兜底
-  if (state.fitMode === "fitHeight") {
-    return Math.round((e.w / e.h) * viewport.clientHeight);
+// 预计算一轮的 prefixSum / totalWidth
+function recomputeLayout(): void {
+  prefixSum = [0];
+  for (let i = 0; i < n(); i++) prefixSum.push(prefixSum[i] + entryWidth(i));
+  totalWidth = prefixSum[n()] || 0;
+}
+
+// 逻辑序号 k（可负 / 超一轮）→ 绝对左边缘坐标
+function logicalX(k: number): number {
+  const len = n();
+  const round = Math.floor(k / len);
+  const idx = ((k % len) + len) % len;
+  return round * totalWidth + prefixSum[idx];
+}
+
+// 绝对坐标 x → 落在哪张图（逻辑序号）
+function kAtX(x: number): number {
+  const len = n();
+  if (len === 0 || totalWidth === 0) return 0;
+  const round = Math.floor(x / totalWidth);
+  const rem = x - round * totalWidth;
+  let lo = 0;
+  let hi = len;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (prefixSum[mid] <= rem) lo = mid;
+    else hi = mid;
   }
-  return e.w; // original
+  return round * len + lo;
 }
 
-function applyHeight(el: HTMLImageElement, height: number) {
-  el.style.height = state.fitMode === "fitHeight" ? `${height}px` : "auto";
+function applyHeight(el: HTMLImageElement): void {
+  el.style.height = state.fitMode === "fitHeight" ? `${viewport.clientHeight}px` : "auto";
 }
 
-// 追加下一张到右侧
-function appendNext() {
-  if (state.entries.length === 0) return;
-  const logicalIndex = nextLogicalIndex;
-  const entry = entryAt(logicalIndex);
-  const width = computeWidth(entry);
+function createItem(k: number): Item {
+  const idx = ((k % n()) + n()) % n();
+  const e = state.entries[idx];
   const el = document.createElement("img");
-  el.src = convertFileSrc(entry.path);
+  el.src = convertFileSrc(e.path);
   el.style.position = "absolute";
-  el.style.left = `${nextLogicalX}px`;
-  el.style.width = `${width}px`;
-  applyHeight(el, viewport.clientHeight);
+  el.style.left = `${logicalX(k)}px`;
+  el.style.width = `${entryWidth(k)}px`;
+  applyHeight(el);
   el.draggable = false;
   film.appendChild(el);
-  items.push({ logicalIndex, el, logicalX: nextLogicalX, width });
-  nextLogicalIndex++;
-  nextLogicalX += width;
+  return { logicalIndex: k, el };
 }
 
-// 右侧不足时继续加载
-function ensureLoaded() {
+// 双向同步缓存窗口：卸载窗口外、加载窗口内缺失的
+function syncWindow(): void {
+  const half = halfBuffer();
   const vw = viewport.clientWidth;
-  const threshold = vw; // 预留约一屏
-  const guard = state.maxCached + 5; // 单帧追加上限，防止极端情况失控
-  while (nextLogicalX < viewportLeft + vw + threshold && items.length < guard) {
-    appendNext();
-  }
-}
+  const winMin = kAtX(viewportLeft) - half;
+  const winMax = kAtX(viewportLeft + vw) + half;
 
-// 移除已滚出视口左侧的图（延迟到超过缓存上限才卸）
-function unloadLeft() {
-  while (items.length > state.maxCached) {
-    const first = items[0];
-    if (first.logicalX + first.width <= viewportLeft) {
-      first.el.remove();
-      items.shift();
-    } else {
-      break;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const li = items[i].logicalIndex;
+    if (li < winMin || li > winMax) {
+      items[i].el.remove();
+      items.splice(i, 1);
+    }
+  }
+  for (let k = winMin; k <= winMax; k++) {
+    if (!items.some((it) => it.logicalIndex === k)) {
+      items.push(createItem(k));
     }
   }
 }
 
-function tick(now: number) {
+function tick(now: number): void {
   if (lastTime === 0) lastTime = now;
   const dt = (now - lastTime) / 1000;
   lastTime = now;
-  viewportLeft += state.speed * dt;
+  if (!state.paused) viewportLeft += state.speed * dt;
   film.style.transform = `translateX(${-viewportLeft}px)`;
-  ensureLoaded();
-  unloadLeft();
+  syncWindow();
   rafId = requestAnimationFrame(tick);
 }
 
-// 切换尺寸模式 / 窗口尺寸变化时，重排现有图
-function relayout() {
-  let x = 0;
-  const h = viewport.clientHeight;
-  for (const it of items) {
-    const e = entryAt(it.logicalIndex);
-    it.width = computeWidth(e);
-    it.logicalX = x;
-    it.el.style.left = `${x}px`;
-    it.el.style.width = `${it.width}px`;
-    applyHeight(it.el, h);
-    x += it.width;
-  }
-  nextLogicalX = x;
-}
-
-function startGallery() {
-  cancelAnimationFrame(rafId);
-  items.forEach((it) => it.el.remove());
+// 切换尺寸 / 窗口 resize：保持左可见图不变，重排
+function relayout(): void {
+  const oldLeftVis = kAtX(viewportLeft);
+  recomputeLayout();
+  viewportLeft = logicalX(oldLeftVis);
+  for (const it of items) it.el.remove();
   items.length = 0;
-  viewportLeft = 0;
-  nextLogicalIndex = 0;
-  nextLogicalX = 0;
+  syncWindow();
+}
+
+function startGallery(startIndex: number): void {
+  cancelAnimationFrame(rafId);
+  for (const it of items) it.el.remove();
+  items.length = 0;
+  recomputeLayout();
+  viewportLeft = logicalX(startIndex); // 以选中文件为中心
+  state.paused = false;
+  updateToggleButton();
+  syncWindow();
+  film.style.transform = `translateX(${-viewportLeft}px)`;
   lastTime = 0;
-  for (let i = 0; i < 5; i++) appendNext(); // 预加载首张 + 后 4 张
-  film.style.transform = "translateX(0px)";
   rafId = requestAnimationFrame(tick);
 }
 
-async function openFile() {
+function togglePause(): void {
+  state.paused = !state.paused;
+  updateToggleButton();
+}
+function updateToggleButton(): void {
+  if (btnToggle) btnToggle.textContent = state.paused ? "▶ 继续" : "⏸ 暂停";
+}
+
+async function openFile(): Promise<void> {
   const selected = await open({
     multiple: false,
     filters: [{ name: "图片", extensions: ["webp", "jpg", "jpeg", "png"] }],
   });
   if (!selected || typeof selected !== "string") return;
   try {
-    state.entries = await invoke<ImgEntry[]>("list_images", { path: selected });
+    const r = await invoke<ListResult>("list_images", { path: selected });
+    state.entries = r.entries;
+    if (state.entries.length === 0) {
+      alert("该目录没有支持的图片文件");
+      return;
+    }
+    startGallery(r.startIndex);
   } catch (e) {
     alert("读取目录失败：" + e);
-    return;
   }
-  if (state.entries.length === 0) {
-    alert("该目录没有支持的图片文件");
-    return;
-  }
-  startGallery();
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   viewport = document.getElementById("viewport")!;
   film = document.getElementById("film")!;
   btnOpen = document.getElementById("btn-open") as HTMLButtonElement;
+  btnToggle = document.getElementById("btn-toggle") as HTMLButtonElement;
   inputSpeed = document.getElementById("input-speed") as HTMLInputElement;
   selectFit = document.getElementById("select-fit") as HTMLSelectElement;
   inputCache = document.getElementById("input-cache") as HTMLInputElement;
 
   inputSpeed.value = String(state.speed);
   inputCache.value = String(state.maxCached);
+  updateToggleButton();
 
   btnOpen.addEventListener("click", openFile);
+  btnToggle.addEventListener("click", togglePause);
+  // 点击图片区域 = 暂停/继续快捷键
+  viewport.addEventListener("click", togglePause);
+  // 滚轮控速：上=加速正方向，下=减速（可过 0 变负即反向）
+  viewport.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      state.speed += e.deltaY < 0 ? SPEED_STEP : -SPEED_STEP;
+      inputSpeed.value = String(state.speed);
+    },
+    { passive: false }
+  );
   inputSpeed.addEventListener("input", () => {
     state.speed = Number(inputSpeed.value) || 0;
   });
   selectFit.addEventListener("change", () => {
     state.fitMode = selectFit.value as FitMode;
-    relayout();
+    if (n() > 0) relayout();
   });
   inputCache.addEventListener("change", () => {
     state.maxCached = Math.max(2, Number(inputCache.value) || 10);
   });
   window.addEventListener("resize", () => {
-    if (items.length > 0) relayout();
+    if (n() > 0) relayout();
   });
 });
