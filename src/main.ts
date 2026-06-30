@@ -188,7 +188,7 @@ function updateToggleButton(): void {
 async function openFile(): Promise<void> {
   const selected = await open({
     multiple: false,
-    filters: [{ name: "图片", extensions: ["webp", "jpg", "jpeg", "png"] }],
+    filters: [{ name: "图片", extensions: ["webp", "jpg", "jpeg", "png", "gif"] }],
   });
   if (!selected || typeof selected !== "string") return;
   try {

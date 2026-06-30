@@ -63,7 +63,7 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-const IMG_EXTS: &[&str] = &["webp", "jpg", "jpeg", "png"];
+const IMG_EXTS: &[&str] = &["webp", "jpg", "jpeg", "png", "gif"];
 
 fn is_image_ext(p: &Path) -> bool {
     match p.extension().and_then(|s| s.to_str()) {

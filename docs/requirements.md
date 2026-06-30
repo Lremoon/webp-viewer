@@ -35,7 +35,7 @@ Windows 桌面看图工具，浏览 WebP（含动图）/ JPG / PNG。核心体�
 
 ## 5. 格式支持
 
-- WebP（含动图）、JPG、JPEG、PNG
+- WebP（含动图）、GIF（动图）、JPG、JPEG、PNG
 - 尺寸预读统一用 `imagesize` crate
 
 ## 6. 约束
