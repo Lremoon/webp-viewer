@@ -76,6 +76,11 @@ body {
   bottom: 0;
   overflow: hidden;
   background: #000;
+  cursor: grab;
+}
+
+#viewport:active {
+  cursor: grabbing;
 }
 
 /* 胶片容器：承载所有缓存图，整体由 translateX 平移 */

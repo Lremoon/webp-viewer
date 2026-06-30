@@ -46,13 +46,20 @@ let prefixSum: number[] = [0];
 let totalWidth = 0;
 
 const SPEED_STEP = 10; // 滚轮每次步进 px/s
+const DRAG_THRESHOLD = 5; // 拖动判定阈值：水平位移超过此值才算拖动，否则算点击
+
+// 拖动状态
+let dragging = false; //鼠标左键处于按下状态
+let dragMoved = false; // 本次按下是否已判定为拖动（超过阈值）
+let dragStartX = 0; // 按下时的鼠标 clientX
+let dragStartLeft = 0; // 按下时的 viewportLeft
 
 function n(): number {
   return state.entries.length;
 }
 function effectiveMax(): number {
   const m = state.maxCached;
-  return m % 2 === 0 ? m : m + 1; // 奇数内部 +1 偶数化（UI 仍显示原值）
+  return m % 2 === 0 ? m : m + 1;
 }
 function halfBuffer(): number {
   return Math.floor(effectiveMax() / 2);
@@ -66,14 +73,12 @@ function entryWidth(logicalIndex: number): number {
     : e.w;
 }
 
-// 预计算一轮的 prefixSum / totalWidth
 function recomputeLayout(): void {
   prefixSum = [0];
   for (let i = 0; i < n(); i++) prefixSum.push(prefixSum[i] + entryWidth(i));
   totalWidth = prefixSum[n()] || 0;
 }
 
-// 逻辑序号 k（可负 / 超一轮）→ 绝对左边缘坐标
 function logicalX(k: number): number {
   const len = n();
   const round = Math.floor(k / len);
@@ -81,7 +86,6 @@ function logicalX(k: number): number {
   return round * totalWidth + prefixSum[idx];
 }
 
-// 绝对坐标 x → 落在哪张图（逻辑序号）
 function kAtX(x: number): number {
   const len = n();
   if (len === 0 || totalWidth === 0) return 0;
@@ -140,7 +144,8 @@ function tick(now: number): void {
   if (lastTime === 0) lastTime = now;
   const dt = (now - lastTime) / 1000;
   lastTime = now;
-  if (!state.paused) viewportLeft += state.speed * dt;
+  // 拖动中（dragMoved）或暂停时不自动推进，由鼠标控制
+  if (!state.paused && !dragMoved) viewportLeft += state.speed * dt;
   film.style.transform = `translateX(${-viewportLeft}px)`;
   syncWindow();
   rafId = requestAnimationFrame(tick);
@@ -161,8 +166,10 @@ function startGallery(startIndex: number): void {
   for (const it of items) it.el.remove();
   items.length = 0;
   recomputeLayout();
-  viewportLeft = logicalX(startIndex); // 以选中文件为中心
+  viewportLeft = logicalX(startIndex);
   state.paused = false;
+  dragging = false;
+  dragMoved = false;
   updateToggleButton();
   syncWindow();
   film.style.transform = `translateX(${-viewportLeft}px)`;
@@ -212,8 +219,34 @@ window.addEventListener("DOMContentLoaded", () => {
 
   btnOpen.addEventListener("click", openFile);
   btnToggle.addEventListener("click", togglePause);
-  // 点击图片区域 = 暂停/继续快捷键
-  viewport.addEventListener("click", togglePause);
+
+  // 鼠标左键：按下记起点；移动超阈值=拖动跟随；松开未超阈值=点击 toggle 暂停
+  viewport.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return; // 只响应左键
+    e.preventDefault();
+    dragging = true;
+    dragMoved = false;
+    dragStartX = e.clientX;
+    dragStartLeft = viewportLeft;
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - dragStartX;
+    if (!dragMoved && Math.abs(dx) > DRAG_THRESHOLD) dragMoved = true;
+    if (dragMoved) {
+      viewportLeft = dragStartLeft - dx; // 鼠标右拖 → 图右移（viewportLeft 减小）
+      film.style.transform = `translateX(${-viewportLeft}px)`;
+      syncWindow();
+    }
+  });
+  document.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    const moved = dragMoved;
+    dragMoved = false;
+    if (!moved) togglePause(); // 未超阈值 = 点击
+  });
+
   // 滚轮控速：上=加速正方向，下=减速（可过 0 变负即反向）
   viewport.addEventListener(
     "wheel",

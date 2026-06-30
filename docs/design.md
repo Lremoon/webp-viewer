@@ -23,12 +23,12 @@
 - `kAtX(x)`：反查，绝对坐标 → 落在哪张图（二分 `prefixSum` + 取模还原）
 - 循环天然成立：k 无限，取模映射回 entries
 
-## 4. 滚动 / 暂停 / 调速
+## 4. 滚动 / 暂停 / 调速 / 拖动
 
-- `tick`：`viewportLeft += speed*dt`（speed 可负 → 反向滚动）
-- 暂停：`state.paused`，tick 内 `if (!paused)` 才推进
-- 暂停触发：工具栏「⏸/▶」按钮，或**点击 viewport**（快捷键）
+- `tick`：`if (!paused && !dragMoved) viewportLeft += speed*dt`（speed 可负 → 反向）
+- 暂停：`state.paused`，工具栏按钮或点击 viewport toggle
 - 滚轮：上 = `+10`，下 = `−10`，speed 可过 0 变负
+- 拖动：mousedown 记起点；mousemove 水平位移 > 5px 进入拖动（`viewportLeft = 起点Left − dx`，图 1:1 跟随）；mouseup 未超阈值 = 点击 toggle，超阈值 = 拖动结束（不 toggle）。拖动中 tick 不自动推进
 
 ## 5. 双向缓存窗口
 
