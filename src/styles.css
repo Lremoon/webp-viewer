@@ -97,3 +97,11 @@ body {
   user-select: none;
   -webkit-user-drag: none;
 }
+
+/* 全屏模式：隐藏工具栏，视口顶满 */
+body.fullscreen #toolbar {
+  display: none;
+}
+body.fullscreen #viewport {
+  top: 0;
+}

@@ -1,4 +1,8 @@
 use std::path::Path;
+use std::sync::Mutex;
+
+// 右键菜单启动时传入的文件路径，前端拉取一次后清空
+struct StartupFile(Mutex<Option<String>>);
 
 // 一张图的条目：路径 + 原始宽高
 #[derive(serde::Serialize)]
@@ -115,12 +119,27 @@ fn list_images(path: String) -> Result<ListResult, String> {
     Ok(ListResult { entries, start_index })
 }
 
+// 取出启动文件路径（右键菜单打开），读一次即清空
+#[tauri::command]
+fn get_startup_file(state: tauri::State<'_, StartupFile>) -> Option<String> {
+    state.0.lock().ok().and_then(|mut g| g.take())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 右键菜单启动时，argv 第一个支持的图片路径作为启动文件
+    let startup = std::env::args()
+        .skip(1)
+        .find(|a| {
+            let p = Path::new(a);
+            p.is_file() && is_image_ext(p)
+        });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![list_images])
+        .manage(StartupFile(Mutex::new(startup)))
+        .invoke_handler(tauri::generate_handler![list_images, get_startup_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

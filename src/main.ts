@@ -1,4 +1,5 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 
 interface ImgEntry {
@@ -26,6 +27,7 @@ let viewport: HTMLElement;
 let film: HTMLElement;
 let btnOpen: HTMLButtonElement;
 let btnToggle: HTMLButtonElement;
+let btnFullscreen: HTMLButtonElement;
 let inputSpeed: HTMLInputElement;
 let selectFit: HTMLSelectElement;
 let inputCache: HTMLInputElement;
@@ -109,12 +111,35 @@ function createItem(k: number): Item {
   const idx = ((k % n()) + n()) % n();
   const e = state.entries[idx];
   const el = document.createElement("img");
-  el.src = convertFileSrc(e.path);
   el.style.position = "absolute";
   el.style.left = `${logicalX(k)}px`;
   el.style.width = `${entryWidth(k)}px`;
   applyHeight(el);
   el.draggable = false;
+
+  // 加载成功：用真实 intrinsic 尺寸校准（imagesize 偶发读失败/不准时自愈）
+  el.addEventListener("load", () => {
+    if (!el.isConnected) return;
+    const nw = el.naturalWidth;
+    const nh = el.naturalHeight;
+    if (nw > 0 && nh > 0 && (nw !== e.w || nh !== e.h)) {
+      e.w = nw;
+      e.h = nh;
+      relayout(); // 保持左可见图不变重排
+    }
+  });
+
+  // 加载失败：递增延迟重试最多 2 次（NAS 网络抖动等偶发失败）
+  let retries = 0;
+  el.addEventListener("error", () => {
+    if (retries >= 2 || !el.isConnected) return;
+    retries++;
+    setTimeout(() => {
+      if (el.isConnected) el.src = convertFileSrc(e.path);
+    }, 300 * retries);
+  });
+
+  el.src = convertFileSrc(e.path);
   film.appendChild(el);
   return { logicalIndex: k, el };
 }
@@ -185,14 +210,19 @@ function updateToggleButton(): void {
   if (btnToggle) btnToggle.textContent = state.paused ? "▶ 继续" : "⏸ 暂停";
 }
 
-async function openFile(): Promise<void> {
-  const selected = await open({
-    multiple: false,
-    filters: [{ name: "图片", extensions: ["webp", "jpg", "jpeg", "png", "gif"] }],
-  });
-  if (!selected || typeof selected !== "string") return;
+// 全屏切换：F11 进/出，Esc 仅退出
+let isFullscreen = false;
+async function toggleFullscreen(): Promise<void> {
+  isFullscreen = !isFullscreen;
+  await getCurrentWindow().setFullscreen(isFullscreen);
+  document.body.classList.toggle("fullscreen", isFullscreen);
+  if (n() > 0) relayout();
+}
+
+// 加载某路径所在目录并开始滚动（弹窗选择与右键启动共用）
+async function loadAndStart(path: string): Promise<void> {
   try {
-    const r = await invoke<ListResult>("list_images", { path: selected });
+    const r = await invoke<ListResult>("list_images", { path });
     state.entries = r.entries;
     if (state.entries.length === 0) {
       alert("该目录没有支持的图片文件");
@@ -204,11 +234,21 @@ async function openFile(): Promise<void> {
   }
 }
 
+async function openFile(): Promise<void> {
+  const selected = await open({
+    multiple: false,
+    filters: [{ name: "图片", extensions: ["webp", "jpg", "jpeg", "png", "gif"] }],
+  });
+  if (!selected || typeof selected !== "string") return;
+  await loadAndStart(selected);
+}
+
 window.addEventListener("DOMContentLoaded", () => {
   viewport = document.getElementById("viewport")!;
   film = document.getElementById("film")!;
   btnOpen = document.getElementById("btn-open") as HTMLButtonElement;
   btnToggle = document.getElementById("btn-toggle") as HTMLButtonElement;
+  btnFullscreen = document.getElementById("btn-fullscreen") as HTMLButtonElement;
   inputSpeed = document.getElementById("input-speed") as HTMLInputElement;
   selectFit = document.getElementById("select-fit") as HTMLSelectElement;
   inputCache = document.getElementById("input-cache") as HTMLInputElement;
@@ -219,6 +259,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   btnOpen.addEventListener("click", openFile);
   btnToggle.addEventListener("click", togglePause);
+  btnFullscreen.addEventListener("click", toggleFullscreen);
 
   // 鼠标左键：按下记起点；移动超阈值=拖动跟随；松开未超阈值=点击 toggle 暂停
   viewport.addEventListener("mousedown", (e) => {
@@ -269,5 +310,20 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   window.addEventListener("resize", () => {
     if (n() > 0) relayout();
+  });
+
+  // 右键菜单启动：拉取传入的文件路径，有则直接打开
+  invoke<string | null>("get_startup_file").then((path) => {
+    if (path) loadAndStart(path);
+  });
+
+  // 全屏：F11 切换，Esc 退出
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "F11") {
+      e.preventDefault();
+      toggleFullscreen();
+    } else if (e.key === "Escape" && isFullscreen) {
+      toggleFullscreen();
+    }
   });
 });
